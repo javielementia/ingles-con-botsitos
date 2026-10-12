@@ -1147,11 +1147,25 @@ var pendingClip=null; /* clip bloqueado por autoplay: suena con el próximo toqu
 var pendingSrc=null;  /* pendiente genérico por URL (p. ej. el saludo del maestrito) */
 var wordPlayGen=0;    /* descarta rechazos viejos al cambiar de palabra */
 var clipChain=null;   /* clip encadenado: suena al terminar el clip actual (p. ej. la reacción «Very good!») */
+var pairSecond=null;  /* pareja de Aprende: {src, gen, lessonId, idx, fallbackText} — la traducción suena tras la palabra meta */
 function getWordAudio(){
   if(!wordAudio){
     wordAudio=new Audio();
     wordAudio.preload='auto';
-    wordAudio.onended=function(){ setTalking(false); setWordCeleb(false); var f=clipChain; clipChain=null; if(f) f(); };
+    wordAudio.onended=function(){
+      /* Pareja de Aprende: terminó la palabra meta → pausa breve y suena la
+         traducción con el mismo elemento; la celebración sigue encendida
+         hasta que termine el segundo clip. */
+      var ps=pairSecond; pairSecond=null;
+      if(ps && ps.gen===wordPlayGen){
+        setTimeout(function(){
+          if(ps.gen!==wordPlayGen) return;
+          playPairSecond(ps);
+        }, 350);
+        return;
+      }
+      setTalking(false); setWordCeleb(false); var f=clipChain; clipChain=null; if(f) f();
+    };
     wordAudio.onerror=function(){ setTalking(false); setWordCeleb(false); };
   }
   return wordAudio;
@@ -1187,7 +1201,7 @@ function setWordCeleb(on){
 }
 function stopWordClip(){
   if(wordAudio){ try{ wordAudio.pause(); }catch(e){} try{ wordAudio.currentTime=0; }catch(e){} }
-  pendingClip=null; pendingSrc=null; clipChain=null;
+  pendingClip=null; pendingSrc=null; clipChain=null; pairSecond=null;
   setTalking(false); setWordCeleb(false);
 }
 /* Reproduce cualquier clip grabado por su ruta (la respuesta que «dice» el
@@ -1247,6 +1261,62 @@ function playWord(lessonId, idx, fallbackText){
   }
   return true;
 }
+/* Modo APRENDE: cada palabra suena en los DOS idiomas — primero la palabra
+   meta y enseguida su traducción, con el mismo Audio persistente, para que el
+   puente inglés↔español se ESCUCHE, no solo se lea. La celebración visual
+   (hablando/celebra) cubre la pareja completa: inicia con el primer clip y
+   termina con el onended del segundo. Si el visor bloquea algún clip de la
+   cadena, la pareja queda pendiente y se reanuda completa al próximo toque. */
+function playWordPair(lessonId, idx, fallbackText){
+  stopWordClip();
+  var metaList=(esDir() ? AUDIO_WORDS_ES : AUDIO_WORDS)[lessonId];
+  var trList=(esDir() ? AUDIO_WORDS : AUDIO_WORDS_ES)[lessonId];
+  var src1=(metaList && idx>=0 && idx<metaList.length) ? metaList[idx] : null;
+  var src2=(trList && idx>=0 && idx<trList.length) ? trList[idx] : null;
+  if(!src1) return playWord(lessonId, idx, fallbackText); /* sin clip: comportamiento normal */
+  var gen=++wordPlayGen;
+  setTalking(true); setWordCeleb(true);
+  if(src2) pairSecond={src:src2, gen:gen, lessonId:lessonId, idx:idx, fallbackText:fallbackText};
+  var a=getWordAudio();
+  try{ a.pause(); }catch(e){}
+  a.src=src1;
+  try{ a.currentTime=0; }catch(e){}
+  var p=null;
+  try{ p=a.play(); }catch(e){ p=null; }
+  if(p && p.catch){
+    p.catch(function(){
+      if(gen!==wordPlayGen) return; /* era el rechazo de una palabra anterior */
+      /* Primer clip bloqueado: la pareja completa queda pendiente y suena
+         entera con el próximo toque en cualquier parte. */
+      pairSecond=null;
+      pendingClip={lessonId:lessonId, idx:idx, fallbackText:fallbackText, pair:true};
+    });
+  }else if(!p){
+    pairSecond=null;
+    pendingClip={lessonId:lessonId, idx:idx, fallbackText:fallbackText, pair:true};
+  }
+  return true;
+}
+/* Segunda mitad de la pareja de Aprende: la traducción, con el mismo elemento
+   y la misma guarda de generación. */
+function playPairSecond(ps){
+  var a=getWordAudio();
+  try{ a.pause(); }catch(e){}
+  a.src=ps.src;
+  try{ a.currentTime=0; }catch(e){}
+  var p=null;
+  try{ p=a.play(); }catch(e){ p=null; }
+  if(p && p.catch){
+    p.catch(function(){
+      if(ps.gen!==wordPlayGen) return;
+      /* Segundo clip bloqueado a mitad de cadena: la pareja completa queda
+         pendiente y se reanuda entera con el próximo toque. */
+      pendingClip={lessonId:ps.lessonId, idx:ps.idx, fallbackText:ps.fallbackText, pair:true};
+    });
+  }else if(!p){
+    pendingClip={lessonId:ps.lessonId, idx:ps.idx, fallbackText:ps.fallbackText, pair:true};
+  }
+}
 /* Desbloqueo por gesto: al primer toque en cualquier parte del documento,
    si hay un clip pendiente, suena de una vez. */
 document.addEventListener('pointerdown', function(){
@@ -1261,7 +1331,10 @@ document.addEventListener('pointerdown', function(){
   }
   if(!pendingClip) return;
   var pc=pendingClip; pendingClip=null;
-  playWord(pc.lessonId, pc.idx, pc.fallbackText);
+  /* La pareja de Aprende bloqueada se reanuda COMPLETA (meta + traducción);
+     los demás clips usan playWord normal. */
+  if(pc.pair) playWordPair(pc.lessonId, pc.idx, pc.fallbackText);
+  else playWord(pc.lessonId, pc.idx, pc.fallbackText);
 });
 /* Dice una palabra de la lección actual buscándola por su texto en inglés;
    el clip que suena es el de la dirección elegida (inglés o español) */
@@ -1412,7 +1485,7 @@ function paintAprende(){
 function speakAprende(){
   var par=current.palabras[apIdx];
   paintWord(document.getElementById('aprende-word'), tgt(par), true);
-  playWord(current.id, apIdx, tgt(par));
+  playWordPair(current.id, apIdx, tgt(par)); /* Aprende: la palabra suena en los DOS idiomas */
 }
 function aprendeNav(dir){
   if(dir>0 && apIdx===current.palabras.length-1){
